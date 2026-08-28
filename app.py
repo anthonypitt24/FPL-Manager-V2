@@ -313,7 +313,14 @@ def historical_player_prior(hist: dict, current_name: str) -> dict:
         name_col = "web_name" if "web_name" in df.columns else "second_name"
         hits = df[df[name_col].astype(str).map(normalise_name) == key]
         if hits.empty and "first_name" in df.columns and "second_name" in df.columns:
-            full = (hits["first_name"].astype(str) + hits["second_name"].astype(str)).map(normalise_name)
+            # IMPORTANT: build the full-name key from the full dataframe, not
+            # from `hits` (which is empty at this point). The previous version
+            # accidentally created an empty Series here, causing pandas to raise
+            # an IndexingError when applying the boolean mask.
+            full = (
+                df["first_name"].fillna("").astype(str)
+                + df["second_name"].fillna("").astype(str)
+            ).map(normalise_name)
             hits = df[full == key]
         if not hits.empty:
             r = hits.iloc[0]
@@ -844,19 +851,30 @@ class ChipOption:
 
 
 def remaining_chips(entry_id: int, current_gw: int) -> dict[str, bool]:
-    try:
-        h = get_entry_history(entry_id)
-        chips = h.get("chips", [])
-        used = {str(c.get("name", "")).lower() for c in chips if safe_int(c.get("event")) <= current_gw}
-    except Exception:
-        used = set()
-    half = 1 if current_gw <= 19 else 2
-    # API chip names are normally wildcard/freehit/benchboost/triplecaptain; use half based on actual used event.
-    out = {}
-    for chip in ("wildcard", "freehit", "benchboost", "triplecaptain"):
-        used_half = any(str(c.get("name", "")).lower() == chip and (safe_int(c.get("event")) <= 19) == (half == 1) for c in get_entry_history(entry_id).get("chips", [])) if entry_id else False
-        out[chip] = not used_half
-    return out
+    """Return availability for the chip set belonging to the current half-season.
+
+    FPL has one set of chips for GW1-19 and a fresh set for GW20-38.
+    Fetch the history once and only count chips actually used in the current half.
+    """
+    chips = []
+    if entry_id:
+        try:
+            chips = get_entry_history(entry_id).get("chips", [])
+        except Exception:
+            chips = []
+
+    half_start = 1 if current_gw <= 19 else 20
+    half_end = 19 if current_gw <= 19 else 38
+    used_current_half = {
+        str(c.get("name", "")).lower()
+        for c in chips
+        if half_start <= safe_int(c.get("event")) <= half_end
+    }
+
+    return {
+        chip: chip not in used_current_half
+        for chip in ("wildcard", "freehit", "benchboost", "triplecaptain")
+    }
 
 
 def fixture_windows(fixture_map: dict, teams: dict[int, dict], start_gw: int, end_gw: int) -> pd.DataFrame:
